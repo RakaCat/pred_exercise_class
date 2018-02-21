@@ -1,0 +1,107 @@
+---
+title: "Predicting correctness of exercise activity"
+output: html_document
+---
+
+```{r setup, include=FALSE, cache = TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Data Processing and EDA
+
+It was hypothesized that the user who performed the action should have little impacts on the motion data. PCA is performed to observe how well the data are partitioned linearly.   
+
+The data consisted of feature generated (eg skewness, kurtosis etc) from the raw sensor readings. Nonetheless, since they are absent in the test set, these generated features will be removed. 
+
+The number of observation is extremely sufficient comparing to the class and predictors. Moreover, NA is scarce after exclusion of generated features. Thus, only complete cases will be taken into model building.
+
+```{r PCA and clean, cache=TRUE, warning=FALSE, message = FALSE}
+library(readr)
+f <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+if(!exists("pml_training")){
+  download.file(url = f, 'pml-training.csv')
+  pml_training <- read_csv("pml-training.csv", col_types = cols(X1 = col_skip()))
+}
+#Data separated summary of each window
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggfortify)
+
+prop_train <- pml_training[pml_training$new_window == 'no',]
+table(prop_train$classe) #Rouhgly equal, 5 levels
+keep <- (apply(pml_training, 2, function(x) sum(is.na(x))) < 1000)
+prop_train <- select(prop_train, which(keep)) #Remove timestamp because of the format of test set
+rmv <- which(apply(prop_train, 1, function(x)sum(is.na(x))) > 0) #Only 1 record has missing value in raw sensors.
+prop_train <- prop_train[-rmv,]
+pca <- prcomp(prop_train[,7:58], center = TRUE, scale = TRUE)
+prop_train$user_name <- as.factor(prop_train$user_name)
+prop_train$classe <- as.factor(prop_train$classe)
+
+p1 <- autoplot(pca, data = prop_train, colour = 'classe', alpha = 0.5)
+p2 <- autoplot(pca, data = prop_train, colour = 'user_name', alpha = 0.5)
+ggarrange(p1, p2, labels = 'AUTO')
+#Interestingly and unfortunately, PCA distinguishes users who performed the action but not the classe
+#This neccessitates include user_name in prediction model
+```
+
+Interestingly and unfortunately, PCA distinguished users who performed the action, but not the class. This neccssitates including user_name in model construction.
+
+## Model building strategy
+
+Three models are considered:
+
+    1   LDA
+    2   Tree-based
+    3   Random Forest
+    
+LDA would require adequate preprocessing as shown in code. Near-zero variance predictors are screened.
+
+75% samples are randomly drawn without replacement from the training set for model construction. The rest is used for estimating out-of-bag prediction accuracy. 
+    
+```{r models, cache=TRUE, message=FALSE, warning=FALSE}
+library(caret)
+set.seed(5)
+key <- createDataPartition(prop_train$classe, p = 0.8, list = FALSE)
+#Add partioning here
+traintrain <- prop_train[key,-(2:6)]
+estoob <- prop_train[-key,-(2:6)]
+nzv <- nearZeroVar(traintrain, saveMetrics = TRUE)
+
+cv <- trainControl(method = "cv", p = 0.75, number = 4)
+#train
+fit_tree <- train(classe ~ ., method = "rpart", trControl = cv, data = traintrain)
+fit_lda <- train(classe~., preProcess = c('center', 'scale'), method = 'lda', data = traintrain)
+fit_rf <- train(classe~., method = "rf", trControl = cv,data = traintrain)
+
+```
+
+
+## Validation
+Predicting out-of-bag samples, the random forest models provide an accuracy of 0.9935 (95%CI 0.9904-0.9958). 
+
+```{r validation, cache = TRUE}
+library(caret)
+#predict
+pred_tree <- predict(fit_tree, estoob)
+pred_lda <- predict(fit_lda, estoob)
+pred_rf <- predict(fit_rf, estoob)
+#test
+confusionMatrix(pred_tree, estoob$classe)
+confusionMatrix(pred_lda, estoob$classe)
+confusionMatrix(pred_rf, estoob$classe)
+
+library(randomForest)
+plot(fit_rf)
+varImpPlot(fit_rf$finalModel, n.var = 15)
+
+```
+
+## Predicting test set
+Due to the excellent accuracy using random forest, we don't see the need of model ensemble.
+```{r test}
+library(readr)
+pml_testing <- read_csv("pml-testing.csv", col_types = cols(X1 = col_skip()))
+predict(fit_rf, pml_testing)
+```
+
